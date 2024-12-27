@@ -153,16 +153,13 @@ resource "ansible_host" "outline_server_host" {
   ]
 
   name   = "outline_server"
-  groups = ["server"]
+  groups = ["servers"]
 
   variables = {
     ansible_user                 = "ubuntu"
     ansible_host                 = aws_instance.outline_server_ec2.public_ip
     ansible_ssh_private_key_file = "./files/outline_rsa"
-    node_hostname                = "server"
+    node_hostname                = "outline_server"
   }
 }
 
-# output "instances" {
-#   value = data.arvan_abraks.instance_list.instances
-# }

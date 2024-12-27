@@ -70,7 +70,7 @@
         name: containerd
 
 - name: Setup Outline Server
-  hosts: server
+  hosts: servers
   become: true
   tasks:
     - name: install outline server
