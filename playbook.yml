@@ -1,5 +1,5 @@
 ---
-- name: Basic Setup
+- name: Install prerequisties
   hosts: all
   gather_facts: false
   become: true
@@ -18,55 +18,7 @@
       hostname:
         name: "{{ node_hostname }}"
 
-    - name: Copy /etc/hosts template
-      copy:
-        backup: true
-        src: ./files/hosts
-        dest: /tmp/hosts
-
-    - name: Insert/Update configuration using a local file and validate it
-      blockinfile:
-        block: "{{ lookup('file', './files/hosts') }}"
-        path: /etc/hosts
-        backup: yes
-
-    - name: Disable swap on all nodes
-      shell: swapoff -a
-
-    - name: kernel module prerequesites
-      shell:
-        cmd: |
-          cat << EOF | sudo tee /etc/modules-load.d/k8s.conf
-          overlay
-          br_netfilter
-          EOF
-
-    - name: add overlay module
-      modprobe:
-        name: overlay
-        state: present
-
-    - name: add br_netfilter module
-      modprobe:
-        name: br_netfilter
-        state: present
-
-    - name: sysctl params required by setup
-      shell:
-        cmd: |
-          cat << EOF | sudo tee /etc/sysctl.d/k8s.conf
-          net.bridge.bridge-nf-call-iptables  = 1
-          net.bridge.bridge-nf-call-ip6tables = 1
-          net.ipv4.ip_forward                 = 1
-          EOF
-
-    - name: apply sysctl params without reboot
-      shell: sysctl --system
-
-    - name: create containerd config file
-      shell: mkdir -p /etc/containerd && touch /etc/containerd/config.toml
-
-    - name: Install containerd pre-reqs
+    - name: Install necassary packages
       apt:
         pkg:
           - apt-transport-https
@@ -74,6 +26,8 @@
           - curl
           - gnupg
           - lsb-release
+          - vim
+          - net-tools
 
     - name: add docker GPG key
       apt_key:
@@ -115,138 +69,16 @@
         daemon_reload: yes
         name: containerd
 
-    ## NOTE: kubeadm stuff
-    - name: Download Google Cloud's public key
-      shell:
-        cmd: |
-          curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.31/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-          echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.31/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
-          apt-get update
-
-    - name: Install kubadm, kubectl, kubelet
-      apt:
-        pkg:
-          - kubelet
-          - kubeadm
-          - kubectl
-
-    - name: hold kubectl,kubeadm,kubelet packages
-      shell: apt-mark hold kubelet kubectl kubeadm
-
-    - name: Enable service kublet
-      systemd:
-        name: kubelet
-        state: started
-        enabled: yes
-
-- name: Setup Control Plane Node
-  hosts: master
+- name: Setup Outline Server
+  hosts: server
   become: true
   tasks:
-    - name: init kubeadm
-      shell: sudo kubeadm init --pod-network-cidr=10.244.0.0/16 --control-plane-endpoint "{{ansible_host}}:6443"
+    - name: install outline server
+      shell: sudo bash -c "$(wget -qO- https://raw.githubusercontent.com/Jigsaw-Code/outline-server/master/src/server_manager/install_scripts/install_server.sh)" --keys-port=443 --api-port=8080
 
-    - name: create ~/.kube directory
-      file:
-        path: ~/.kube
-        state: directory
-        mode: "0755"
-
-    - name: copy kubeconfig file
-      shell: sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
-
-    - name: set the correct permission on kubeconfig file
-      shell: sudo chown $(id -u):$(id -g) $HOME/.kube/config
-
-    - name: install flannel
-      shell: kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
-
-    - name: Copy kubeconfig file locally
+    - name: Copy outline access.txt locally
       fetch:
-        src: $HOME/.kube/config
-        dest: ./files/kubeconfig
+        src: /opt/outline/access.txt
+        dest: ./files/access.txt
         flat: yes
-
-    - name: Install helm if not exists
-      unarchive:
-        src: https://get.helm.sh/helm-v3.11.0-linux-amd64.tar.gz
-        dest: /usr/local/bin
-        extra_opts: "--strip-components=1"
-        owner: root
-        group: root
-        mode: 0755
-        remote_src: true
-      args:
-        creates: /usr/local/bin/helm
-
-    - name: Generate join token for worker nodes
-      shell: sudo kubeadm token create --print-join-command
-      register: join_node_token
-
-    - name: Save join command as variable
-      set_fact:
-        join_node: "{{ join_node_token.stdout_lines[0] }}"
-
-- name: Setup Worker Nodes
-  hosts: workers
-  become: true
-  tasks:
-    - name: add worker nodes to cluster
-      shell: "sudo {{ hostvars['control_plane'].join_node }}"
-
-- name: Install Prometheus and Grafana in cluster
-  hosts: master
-  become: true
-  tasks:
-    - name: Install Prometheus with Helm Chart
-      shell:
-        cmd: |
-          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-          helm repo update
-          helm install prometheus prometheus-community/prometheus
-          kubectl expose service prometheus-server --type=NodePort --target-port=9090 --name=prometheus-server-ext
-          kubectl expose service prometheus-alertmanager --type=NodePort --target-port=9093 --name=prometheus-alertmanager-ext
-      tags:
-        - monitoring
-    
-    - name: Install Grafana with Helm Chart
-      shell:
-        cmd: |
-          helm repo add grafana https://grafana.github.io/helm-charts
-          helm repo update
-          helm install grafana grafana/grafana
-          kubectl expose service grafana --type=NodePort --target-port=3000 --name=grafana-ext
-      tags:
-        - monitoring
-
-- name: Deploy Postgresql Cluster
-  hosts: master
-  become: true
-  tasks:    
-    - name: Install Postgresql with Helm Chart
-      shell:
-        cmd: |
-          helm install postgres oci://registry-1.docker.io/bitnamicharts/postgresql
-          # TODO: retreive password and save in env or put it into a vault
-      tags:
-        - postgres
-
-- name: Setup ArgoCD in cluster
-  hosts: master
-  become: true
-  tasks:
-    - name: Create Separate Namespace for ArgoCD
-      kubernetes.core.k8s:
-        name: argocd
-        api_version: v1
-        kind: Namespace
-        state: present
-      tags:
-        - argocd
-    
-    - name: Install ArgoCD with Helm Chart
-      shell:
-        cmd: kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
-      tags:
-        - argocd
 
